@@ -17,12 +17,26 @@ def br_to_decimal(valor_str: str) -> Decimal:
 def extrair_balancete_mv(arquivo_pdf) -> dict:
     """
     Lê o Relatório de Balancete Contábil Mensal - Analítico (SoulMV)
-    e retorna os valores por rubrica e os totais gerais.
+    extraindo a seção 'Total Geral por Tp. Documento:' (Página 2) ou o texto completo.
     """
     texto_completo = ""
     with pdfplumber.open(arquivo_pdf) as pdf:
         for pagina in pdf.pages:
             texto_completo += "\n" + (pagina.extract_text() or "")
+
+    # Foca na seção consolidada "Total Geral por Tp. Documento:" se existir
+    if "Total Geral por Tp. Documento:" in texto_completo:
+        bloco = texto_completo.split("Total Geral por Tp. Documento:")[-1]
+    else:
+        bloco = texto_completo
+
+    padrao_num = r"(\d{1,3}(?:\.\d{3})*,\d{4})"
+
+    def buscar_valores(rotulo_regex: str) -> list[Decimal]:
+        m = re.search(rotulo_regex + r"([^\n]*)", bloco)
+        if m:
+            return [br_to_decimal(n) for n in re.findall(padrao_num, m.group(1))]
+        return []
 
     dados = {
         "estoque": "93 - CAF" if "93" in texto_completo else ("74 - CAQ" if "74" in texto_completo else "Desconhecido"),
@@ -49,50 +63,42 @@ def extrair_balancete_mv(arquivo_pdf) -> dict:
         "saldo_atual": Decimal("0.0000"),
     }
 
-    padrao_num = r"(\d{1,3}(?:\.\d{3})*,\d{4})"
+    # Campos de 1 valor
+    campos_simples = [
+        (r"Nota Fiscal(?!\s+não\s+Cobrada)", "nota_fiscal_total"),
+        (r"Saída para Setor", "saida_setor"),
+        (r"Baixa", "baixa"),
+        (r"Empréstimo Recebido", "emprestimo_recebido"),
+        (r"Pagamento de Empréstimo Recebido", "pgto_emprestimo_recebido"),
+        (r"Pagamento de Empréstimo Concedido", "pgto_emprestimo_concedido"),
+        (r"Empréstimo Concedido", "emprestimo_concedido"),
+        (r"Devolução de Fornecedor", "devolucao_fornecedor"),
+        (r"Devolução de Setor", "devolucao_setor"),
+        (r"Devolução de Paciente", "devolucao_paciente"),
+        (r"Doação de Produtos", "doacao"),
+    ]
+    for regex, chave in campos_simples:
+        vals = buscar_valores(regex)
+        if vals:
+            dados[chave] = vals[0]
 
-    for linha in texto_completo.splitlines():
-        nums = [br_to_decimal(n) for n in re.findall(padrao_num, linha)]
-        if not nums:
-            continue
+    # Campos de 2 valores (Entrada e Saída)
+    for regex, ch_ent, ch_sai in [
+        (r"Transferências(?!\s+entre)", "transferencias_ent", "transferencias_sai"),
+        (r"Contagem", "contagem_ent", "contagem_sai"),
+        (r"Ajuste", "ajuste_ent", "ajuste_sai"),
+    ]:
+        vals = buscar_valores(regex)
+        if len(vals) >= 2:
+            dados[ch_ent], dados[ch_sai] = vals[0], vals[1]
 
-        if linha.startswith("Nota Fiscal ") and "não Cobrada" not in linha:
-            dados["nota_fiscal_total"] = nums[0]
-        elif linha.startswith("Transferências ") and "entre empresas" not in linha:
-            if len(nums) >= 2:
-                dados["transferencias_ent"], dados["transferencias_sai"] = nums[0], nums[1]
-        elif linha.startswith("Contagem "):
-            if len(nums) >= 2:
-                dados["contagem_ent"], dados["contagem_sai"] = nums[0], nums[1]
-        elif linha.startswith("Saída para Setor"):
-            dados["saida_setor"] = nums[0]
-        elif linha.startswith("Baixa "):
-            dados["baixa"] = nums[0]
-        elif linha.startswith("Empréstimo Recebido"):
-            dados["emprestimo_recebido"] = nums[0]
-        elif linha.startswith("Pagamento de Empréstimo Recebido"):
-            dados["pgto_emprestimo_recebido"] = nums[0]
-        elif linha.startswith("Pagamento de Empréstimo Concedido"):
-            dados["pgto_emprestimo_concedido"] = nums[0]
-        elif linha.startswith("Empréstimo Concedido"):
-            dados["emprestimo_concedido"] = nums[0]
-        elif linha.startswith("Devolução de Fornecedor"):
-            dados["devolucao_fornecedor"] = nums[0]
-        elif linha.startswith("Devolução de Setor"):
-            dados["devolucao_setor"] = nums[0]
-        elif linha.startswith("Devolução de Paciente"):
-            dados["devolucao_paciente"] = nums[0]
-        elif linha.startswith("Doação de Produtos"):
-            dados["doacao"] = nums[0]
-        elif linha.startswith("Ajuste "):
-            if len(nums) >= 2:
-                dados["ajuste_ent"], dados["ajuste_sai"] = nums[0], nums[1]
-        elif linha.startswith("Total Geral:") or linha.startswith("Total da Espécie:"):
-            if len(nums) >= 4:
-                dados["saldo_anterior"] = nums[0]
-                dados["total_entradas"] = nums[1]
-                dados["total_saidas"] = nums[2]
-                dados["saldo_atual"] = nums[3]
+    # Totais Gerais (4 valores: Saldo Anterior, Entradas, Saídas, Saldo Atual)
+    totais = buscar_valores(r"Total Geral:")
+    if len(totais) >= 4:
+        dados["saldo_anterior"] = totais[0]
+        dados["total_entradas"] = totais[1]
+        dados["total_saidas"] = totais[2]
+        dados["saldo_atual"] = totais[3]
 
     return dados
 
